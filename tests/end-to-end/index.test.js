@@ -54,7 +54,7 @@ async function generateReadMe(commit, suiteYaml) {
     '# Test Details',
     '## .github/workflows/push.yml',
     '```YAML',
-    yaml.dump(suiteYaml),
+    suiteYaml,
     '```',
     '## Message',
     commit.message,
