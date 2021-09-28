@@ -37,6 +37,7 @@ async function getWorkflowRuns() {
   const result = await api(`${basePath}/runs`);
   return result.workflow_runs || [];
 }
+exports.getWorkflowRuns = getWorkflowRuns;
 
 function getActionsBasePath() {
   const repoUrl = process.env.TEST_REPO;

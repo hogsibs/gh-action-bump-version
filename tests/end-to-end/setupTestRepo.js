@@ -1,14 +1,13 @@
 const { existsSync } = require('fs');
 const { rm, mkdir, copyFile, stat } = require('fs/promises');
 const { chdir, cwd } = require('process');
-const { resolve, join, dirname } = require('path');
+const { join, dirname } = require('path');
 const exec = require('./exec');
 const git = require('./git');
 const glob = require('tiny-glob');
 const { clearWorkflowRuns } = require('./actionsApi');
 
-module.exports = async function setupTestRepo(actionFileGlobPaths) {
-  const testRepoPath = resolve(__dirname, '..', '..', 'test-repo');
+module.exports = async function setupTestRepo(actionFileGlobPaths, testRepoPath) {
   if (existsSync(testRepoPath)) {
     await rm(testRepoPath, { recursive: true, force: true });
   }
