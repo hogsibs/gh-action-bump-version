@@ -154,6 +154,26 @@ setups:
         expected:
           version: 1.0.1
           branch: other-branch
+  - name: custom-checkout-token
+    yaml:
+      name: Bump Version (Custom Checkout Token)
+      on:
+        push:
+      jobs:
+        bump-version:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v2
+              with:
+                token: ${{ secrets.TEST_TOKEN }}
+            - id: version-bump
+              uses: ./action
+              env:
+                GITHUB_TOKEN: ${{ secrets.TEST_TOKEN }}
+    tests:
+      - message: no keywords
+        expected:
+          version: 1.0.1
 
 actionFiles:
   - index.js
