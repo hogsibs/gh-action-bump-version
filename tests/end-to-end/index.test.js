@@ -1,68 +1,87 @@
 const dotenv = require('dotenv');
 const setupTestRepo = require('./setupTestRepo');
 const yaml = require('js-yaml');
-const { readFileSync } = require('fs');
 const { writeFile, readFile, mkdir } = require('fs/promises');
-const { resolve, join } = require('path');
-const { cwd } = require('process');
+const { join } = require('path');
+const { env } = require('process');
 const git = require('./git');
 const { getMostRecentWorkflowRun, getWorkflowRun } = require('./actionsApi');
+const copyDirectory = require('./copyDirectory');
+const getTestConfig = require('./getTestConfig');
+const pollFor = require('./pollFor');
+const getWorkflowResults = require('./getWorkflowResults');
 
 dotenv.config();
 
-const config = getTestConfig();
+const testConfig = getTestConfig();
+const testRepoPath = join(env.RUNNER_TEMP, 'main');
 
-beforeAll(() => setupTestRepo(config.actionFiles));
+const workflowResults = (async () => {
+  await setupTestRepo(testConfig.actionFiles, testRepoPath);
+  await Promise.all(
+    testConfig.setups.map(async (setup) => {
+      const setupYaml = yaml.dump(setup.yaml);
+      const setupDirectory = join(env.RUNNER_TEMP, setup.name);
+      await mkdir(setupDirectory);
+      await Promise.all(
+        setup.tests.map(async (test, index) => {
+          const testDirectory = join(setupDirectory, `${index}`);
+          await copyDirectory(testRepoPath, testDirectory);
+          const pushYamlPath = join('.github', 'workflows', 'push.yml');
+          await mkdir(join(testDirectory, '.github', 'workflows'), { recursive: true });
+          await writeFile(join(testDirectory, pushYamlPath), setupYaml);
+          await git({ cwd: testDirectory }, 'add', pushYamlPath);
+          await setPackageJsonVersion(test.startingVersion, testDirectory);
+          await git({ cwd: testDirectory }, 'add', 'package.json');
+          await git({ cwd: testDirectory }, 'checkout', '-b', `tests/${setup.name}/${index}`);
 
-config.suites.forEach((suite) => {
-  const suiteYaml = yaml.dump(suite.yaml);
-  describe(suite.name, () => {
-    beforeAll(async () => {
-      const pushYamlPath = join('.github', 'workflows', 'push.yml');
-      await mkdir(join(cwd(), '.github', 'workflows'), { recursive: true });
-      await writeFile(join(cwd(), pushYamlPath), suiteYaml);
-      await git('add', pushYamlPath);
-    });
-    suite.tests.forEach((commit) => {
+          await generateReadMe(test, setupYaml, testDirectory);
+          await git({ cwd: testDirectory }, 'commit', '--message', test.message);
+
+          await git({ cwd: testDirectory }, 'push', '-u', 'origin', 'HEAD');
+        }),
+      );
+    }),
+  );
+  return await getWorkflowResults(testConfig);
+})();
+
+beforeAll(() => workflowResults);
+
+testConfig.setups.forEach((setup) => {
+  describe(setup.name, () => {
+    setup.tests.forEach((commit, index) => {
+      const testDirectory = join(env.RUNNER_TEMP, setup.name, `${index}`);
       test(commit.message, async () => {
-        await generateReadMe(commit, suiteYaml);
-        await git('commit', '--message', commit.message);
+        const results = await workflowResults;
+        const conclusion = results[setup.name][index];
+        expect(conclusion).toBe('success');
 
-        const mostRecentDate = await getMostRecentWorkflowRunDate();
-        await git('push');
+        await assertExpectation(commit.expected, testDirectory);
 
-        const completedRun = await getCompletedRunAfter(mostRecentDate);
-        expect(completedRun.conclusion).toBe('success');
-
-        await assertExpectation(commit.expected);
+        expect(1).toBe(1);
       });
     });
   });
 });
 
-function getTestConfig() {
-  const path = resolve(__dirname, './config.yaml');
-  const buffer = readFileSync(path);
-  const contents = buffer.toString();
-  const config = yaml.load(contents);
-  return config;
-}
-
-async function generateReadMe(commit, suiteYaml) {
+async function generateReadMe(test, setupYaml, directory) {
   const readmePath = 'README.md';
   const readMeContents = [
     '# Test Details',
     '## .github/workflows/push.yml',
     '```YAML',
-    yaml.dump(suiteYaml),
+    setupYaml,
     '```',
     '## Message',
-    commit.message,
+    test.message,
+    '## Starting Version',
+    test.startingVersion,
     '## Expectation',
-    generateExpectationText(commit.expected),
+    generateExpectationText(test.expected),
   ].join('\n');
-  await writeFile(join(cwd(), readmePath), readMeContents);
-  await git('add', readmePath);
+  await writeFile(join(directory, readmePath), readMeContents);
+  await git({ cwd: directory }, 'add', readmePath);
 }
 
 async function getCompletedRunAfter(date) {
@@ -72,25 +91,6 @@ async function getCompletedRunAfter(date) {
     (run) => run.status === 'completed',
   );
   return completedRun;
-}
-
-function pollFor(getResult, validateResult) {
-  return new Promise((resolve, reject) => {
-    pollAndRetry();
-
-    async function pollAndRetry() {
-      try {
-        const result = await getResult();
-        if (validateResult(result)) {
-          resolve(result);
-        } else {
-          setTimeout(pollAndRetry, 1000);
-        }
-      } catch (error) {
-        reject(error);
-      }
-    }
-  });
 }
 
 async function getMostRecentWorkflowRunDate() {
@@ -110,31 +110,42 @@ function generateExpectationText({ version: expectedVersion, tag: expectedTag, b
   return results.join('\n');
 }
 
-async function assertExpectation({ version: expectedVersion, tag: expectedTag, branch: expectedBranch }) {
+async function assertExpectation(
+  { version: expectedVersion, tag: expectedTag, branch: expectedBranch, skipTagCheck },
+  directory,
+) {
   if (expectedTag === undefined) {
     expectedTag = expectedVersion;
   }
   if (expectedBranch) {
-    await git('fetch', 'origin', expectedBranch);
-    await git('checkout', expectedBranch);
+    await git({ cwd: directory }, 'fetch', 'origin', expectedBranch);
+    await git({ cwd: directory }, 'checkout', expectedBranch);
   }
-  await git('pull');
-  const [packageVersion, latestTag] = await Promise.all([getPackageJsonVersion(), getLatestTag()]);
+  await git({ cwd: directory }, 'pull');
+  const [packageVersion, latestTag] = await Promise.all([getPackageJsonVersion(directory), getLatestTag(directory)]);
   expect(packageVersion).toBe(expectedVersion);
-  expect(latestTag).toBe(expectedTag);
-  if (expectedBranch) {
-    await git('checkout', 'main');
+  if (!skipTagCheck) {
+    expect(latestTag).toBe(expectedTag);
   }
 }
 
-async function getPackageJsonVersion() {
-  const path = join(cwd(), 'package.json');
+async function getPackageJsonVersion(directory) {
+  const path = join(directory, 'package.json');
   const contents = await readFile(path);
   const json = JSON.parse(contents);
   return json.version;
 }
 
-async function getLatestTag() {
-  const result = await git({ suppressOutput: true }, 'describe', '--tags', '--abbrev=0');
+async function setPackageJsonVersion(version, directory) {
+  const path = join(directory, 'package.json');
+  const contents = await readFile(path);
+  const json = JSON.parse(contents);
+  json.version = version;
+  const newContents = JSON.stringify(json);
+  await writeFile(path, newContents);
+}
+
+async function getLatestTag(directory) {
+  const result = await git({ suppressOutput: true, cwd: directory }, 'describe', '--tags', '--abbrev=0', '--always');
   return result.stdout;
 }
